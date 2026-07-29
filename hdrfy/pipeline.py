@@ -1,18 +1,21 @@
-"""End-to-end SDR photograph to pure-Python Ultra HDR conversion pipeline."""
+"""End-to-end SDR photograph to optimized pure-Python Ultra HDR conversion."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 from PIL import Image
 
+from .color import srgb_to_linear
 from .config import ConversionConfig
-from .encoder import UltraHDREncodeOptions, encode_ultrahdr, probe_ultrahdr
+from .encoder import UltraHDREncodeOptions, probe_ultrahdr
 from .errors import UnsupportedInputError
+from .fast_encoder import encode_ultrahdr_fast
 from .io import decode_sdr_image, pad_to_even
-from .reconstruct import reconstruct_hdr_linear_bt2020
+from .reconstruct import reconstruct_hdr_from_linear_bt709
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +30,11 @@ class ConversionResult:
     max_content_boost: float
     preset: str
     probe_output: str
+    decode_seconds: float = 0.0
+    reconstruct_seconds: float = 0.0
+    encode_seconds: float = 0.0
+    verify_seconds: float = 0.0
+    total_seconds: float = 0.0
 
 
 def _normalise_output_path(path: str | Path) -> Path:
@@ -44,30 +52,42 @@ def convert_image(
     keep_intermediates: str | Path | None = None,
     verify: bool = True,
 ) -> ConversionResult:
-    """Convert one SDR image into a displayable Ultra HDR JPEG without an external binary."""
+    """Convert one SDR image into a displayable Ultra HDR JPEG.
 
+    The SDR transfer-function decode is performed once and reused by both HDR
+    reconstruction and gain-map generation. Full-resolution base-JPEG encoding
+    is overlapped with the independent gain-map calculations.
+    """
+
+    total_started = perf_counter()
     cfg = config or ConversionConfig()
     cfg.validate()
     source = Path(input_path).expanduser().resolve()
     output = _normalise_output_path(output_path)
+
+    stage_started = perf_counter()
     decoded = decode_sdr_image(source, force_sdr_heif=cfg.force_sdr_heif)
     original_width, original_height = decoded.width, decoded.height
-
-    # Pure-Python JPEG packaging supports odd dimensions directly. Padding is
-    # retained only as an explicit compatibility option for existing configs.
     if cfg.pad_to_even and (decoded.width % 2 or decoded.height % 2):
         decoded, _ = pad_to_even(decoded)
+    decode_seconds = perf_counter() - stage_started
 
-    hdr = reconstruct_hdr_linear_bt2020(
-        decoded.srgb,
+    stage_started = perf_counter()
+    linear_709 = srgb_to_linear(np.clip(decoded.srgb, 0.0, 1.0))
+    hdr = reconstruct_hdr_from_linear_bt709(
+        linear_709,
         max_content_boost=cfg.max_content_boost,
         preset=cfg.reconstruction_preset,
     )
     if not np.all(np.isfinite(hdr)):
         raise RuntimeError("HDR reconstruction produced non-finite samples")
+    reconstruct_seconds = perf_counter() - stage_started
 
-    encoded = encode_ultrahdr(
+    stage_started = perf_counter()
+    encoded = encode_ultrahdr_fast(
         sdr_srgb=decoded.srgb,
+        sdr_linear_bt709=linear_709,
+        base_rgb8=decoded.rgba8[..., :3],
         hdr_linear_bt2020=hdr,
         output=output,
         exif=decoded.exif if cfg.preserve_exif else None,
@@ -82,6 +102,7 @@ def convert_image(
             target_peak_nits=cfg.peak_nits,
         ),
     )
+    encode_seconds = perf_counter() - stage_started
 
     if keep_intermediates:
         work = Path(keep_intermediates).expanduser().resolve()
@@ -90,7 +111,11 @@ def convert_image(
         np.save(work / "sdr_intent_srgb.npy", decoded.srgb)
         Image.fromarray(encoded.gainmap).save(work / "gainmap.png")
 
+    stage_started = perf_counter()
     probe_output = probe_ultrahdr(output) if verify else "verification disabled"
+    verify_seconds = perf_counter() - stage_started
+    total_seconds = perf_counter() - total_started
+
     return ConversionResult(
         input_path=source,
         output_path=output,
@@ -102,4 +127,9 @@ def convert_image(
         max_content_boost=cfg.max_content_boost,
         preset=cfg.preset,
         probe_output=probe_output,
+        decode_seconds=decode_seconds,
+        reconstruct_seconds=reconstruct_seconds,
+        encode_seconds=encode_seconds,
+        verify_seconds=verify_seconds,
+        total_seconds=total_seconds,
     )
