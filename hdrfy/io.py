@@ -106,9 +106,14 @@ def _decode_heif(path: Path, force_sdr: bool) -> DecodedImage:
         ) from exc
 
     try:
+        # HeifFile itself addresses the declared primary image. Index 0 is not
+        # necessarily primary in multi-image HEIF containers.
         heif = pillow_heif.open_heif(path, convert_hdr_to_8bit=False)
-        primary = heif[0]
-        info = dict(primary.info)
+        info = dict(heif.info)
+        # Standalone open_heif() does not normalise EXIF/XMP orientation. HEIF
+        # presentation transforms are already applied by libheif, so reset the
+        # informational metadata before embedding it into the output JPEG.
+        pillow_heif.set_orientation(info)
         nclx = info.get("nclx_profile") or {}
         transfer = int(nclx.get("transfer_characteristics", -1))
         if transfer in _HDR_TRANSFER_CODES and not force_sdr:
@@ -117,7 +122,7 @@ def _decode_heif(path: Path, force_sdr: bool) -> DecodedImage:
                 f"{path} is tagged as existing {label} HDR. Use --force-sdr-heif only when the "
                 "metadata is known to be wrong."
             )
-        array = np.asarray(primary)
+        array = np.asarray(heif)
         srgb = _normalise_array(array)
         rgb8 = np.rint(srgb * 255.0).clip(0, 255).astype(np.uint8)
         alpha = np.full((*rgb8.shape[:2], 1), 255, dtype=np.uint8)
@@ -127,7 +132,7 @@ def _decode_heif(path: Path, force_sdr: bool) -> DecodedImage:
             exif = None
         source_info = {
             "format": path.suffix.lower().lstrip("."),
-            "mode": primary.mode,
+            "mode": heif.mode,
             "source": str(path),
             "nclx_profile": nclx,
         }
