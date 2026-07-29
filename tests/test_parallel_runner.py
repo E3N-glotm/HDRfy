@@ -1,11 +1,19 @@
+import importlib.util
+import sys
 import threading
 import time
 from pathlib import Path
 
-import run_hdrfy
 from hdrfy.config import ConversionConfig
 from hdrfy.pipeline import ConversionResult
 from hdrfy.script_runner import BatchItem
+
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "run_hdrfy.py"
+_SPEC = importlib.util.spec_from_file_location("hdrfy_test_run_script", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+run_hdrfy = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = run_hdrfy
+_SPEC.loader.exec_module(run_hdrfy)
 
 
 def _result(item: BatchItem) -> ConversionResult:
