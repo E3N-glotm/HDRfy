@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -15,6 +16,60 @@ from .errors import ExistingHDRInputError, UnsupportedInputError
 
 _HEIF_SUFFIXES = {".heic", ".heif", ".avif", ".hif"}
 _HDR_TRANSFER_CODES = {16, 18}  # ITU-R BT.2100 PQ and HLG in H.273/NCLX.
+_JPEG_EXIF_MAX_BYTES = 65533
+_EXIF_IFD_TAG = 34665
+_GPS_IFD_TAG = 34853
+_ORIENTATION_TAG = 274
+_BULKY_EXIF_TAGS = {
+    700,
+    33723,
+    34377,
+    37500,
+    37510,
+}
+_SAFE_ROOT_EXIF_TAGS = {
+    270,
+    271,
+    272,
+    274,
+    282,
+    283,
+    296,
+    305,
+    306,
+    315,
+    33432,
+}
+_SAFE_CAMERA_EXIF_TAGS = {
+    33434,
+    33437,
+    34850,
+    34855,
+    36867,
+    36868,
+    37377,
+    37378,
+    37380,
+    37383,
+    37385,
+    37386,
+    40960,
+    40961,
+    40962,
+    40963,
+    41483,
+    41728,
+    41729,
+    41985,
+    41986,
+    41987,
+    41988,
+    41989,
+    41990,
+    42034,
+    42035,
+    42036,
+}
 
 
 @dataclass(slots=True)
@@ -63,8 +118,111 @@ def _convert_embedded_icc_to_srgb(image: Image.Image) -> Image.Image:
         target = ImageCms.createProfile("sRGB")
         return ImageCms.profileToProfile(image.convert("RGB"), source, target, outputMode="RGB")
     except Exception:
-        # Invalid profiles should not make otherwise decodable photographs unusable.
         return image.convert("RGB")
+
+
+def _is_oversized_exif_value(value: object, limit: int = 16384) -> bool:
+    if isinstance(value, (bytes, bytearray, memoryview, str)):
+        return len(value) > limit
+    if isinstance(value, (tuple, list)):
+        return any(_is_oversized_exif_value(item, limit) for item in value)
+    return False
+
+
+def _trim_ifd_values(ifd: dict[int, Any]) -> dict[int, Any]:
+    return {
+        int(tag): value
+        for tag, value in ifd.items()
+        if int(tag) not in _BULKY_EXIF_TAGS and not _is_oversized_exif_value(value)
+    }
+
+
+def _prepare_exif_for_jpeg(payload: bytes | bytearray | None) -> bytes | None:
+    """Return JPEG-safe EXIF while preserving useful photographic metadata."""
+
+    if not payload:
+        return None
+    raw = bytes(payload)
+    if len(raw) <= _JPEG_EXIF_MAX_BYTES:
+        return raw
+
+    try:
+        parsed = Image.Exif()
+        parsed.load(raw)
+        parsed[_ORIENTATION_TAG] = 1
+
+        for tag in list(parsed):
+            if int(tag) in _BULKY_EXIF_TAGS or _is_oversized_exif_value(parsed[tag]):
+                parsed.pop(tag, None)
+
+        for ifd_tag in (_EXIF_IFD_TAG, _GPS_IFD_TAG):
+            try:
+                compact_ifd = _trim_ifd_values(dict(parsed.get_ifd(ifd_tag)))
+            except Exception:
+                compact_ifd = {}
+            if compact_ifd:
+                parsed[ifd_tag] = compact_ifd
+            else:
+                parsed.pop(ifd_tag, None)
+
+        compact = parsed.tobytes()
+        if len(compact) <= _JPEG_EXIF_MAX_BYTES:
+            warnings.warn(
+                f"EXIF metadata was reduced from {len(raw)} to {len(compact)} bytes "
+                "to satisfy the JPEG APP1 limit.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return compact
+
+        minimal = Image.Exif()
+        for tag in _SAFE_ROOT_EXIF_TAGS:
+            if tag in parsed and not _is_oversized_exif_value(parsed[tag], 4096):
+                minimal[tag] = parsed[tag]
+        minimal[_ORIENTATION_TAG] = 1
+
+        try:
+            camera_ifd = {
+                tag: value
+                for tag, value in dict(parsed.get_ifd(_EXIF_IFD_TAG)).items()
+                if tag in _SAFE_CAMERA_EXIF_TAGS and not _is_oversized_exif_value(value, 4096)
+            }
+        except Exception:
+            camera_ifd = {}
+        if camera_ifd:
+            minimal[_EXIF_IFD_TAG] = camera_ifd
+
+        try:
+            gps_ifd = _trim_ifd_values(dict(parsed.get_ifd(_GPS_IFD_TAG)))
+        except Exception:
+            gps_ifd = {}
+        if gps_ifd:
+            minimal[_GPS_IFD_TAG] = gps_ifd
+
+        compact = minimal.tobytes()
+        if len(compact) <= _JPEG_EXIF_MAX_BYTES:
+            warnings.warn(
+                f"EXIF metadata was reduced from {len(raw)} to a {len(compact)}-byte "
+                "camera/date/GPS subset to satisfy the JPEG APP1 limit.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return compact
+    except Exception as exc:
+        warnings.warn(
+            f"Oversized EXIF metadata could not be normalised and will be omitted: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    warnings.warn(
+        f"EXIF metadata ({len(raw)} bytes) still exceeds the JPEG APP1 limit after "
+        "normalisation and will be omitted.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return None
 
 
 def _serialise_exif(image: Image.Image) -> bytes | None:
@@ -72,10 +230,8 @@ def _serialise_exif(image: Image.Image) -> bytes | None:
         exif = image.getexif()
         if not exif:
             return None
-        # Orientation has already been applied by ImageOps.exif_transpose.
-        exif[274] = 1
-        payload = exif.tobytes()
-        return payload or None
+        exif[_ORIENTATION_TAG] = 1
+        return _prepare_exif_for_jpeg(exif.tobytes())
     except Exception:
         return None
 
@@ -106,13 +262,8 @@ def _decode_heif(path: Path, force_sdr: bool) -> DecodedImage:
         ) from exc
 
     try:
-        # HeifFile itself addresses the declared primary image. Index 0 is not
-        # necessarily primary in multi-image HEIF containers.
         heif = pillow_heif.open_heif(path, convert_hdr_to_8bit=False)
         info = dict(heif.info)
-        # Standalone open_heif() does not normalise EXIF/XMP orientation. HEIF
-        # presentation transforms are already applied by libheif, so reset the
-        # informational metadata before embedding it into the output JPEG.
         pillow_heif.set_orientation(info)
         nclx = info.get("nclx_profile") or {}
         transfer = int(nclx.get("transfer_characteristics", -1))
@@ -139,7 +290,7 @@ def _decode_heif(path: Path, force_sdr: bool) -> DecodedImage:
         return DecodedImage(
             srgb=srgb,
             rgba8=rgba8,
-            exif=bytes(exif) if exif else None,
+            exif=_prepare_exif_for_jpeg(exif),
             source_info=source_info,
         )
     except ExistingHDRInputError:
@@ -160,7 +311,7 @@ def decode_sdr_image(path: str | Path, *, force_sdr_heif: bool = False) -> Decod
 
 
 def pad_to_even(image: DecodedImage) -> tuple[DecodedImage, tuple[int, int]]:
-    """Edge-pad odd dimensions because some libultrahdr builds mishandle them."""
+    """Edge-pad odd dimensions for optional compatibility with older encoders."""
 
     pad_h = image.height % 2
     pad_w = image.width % 2
