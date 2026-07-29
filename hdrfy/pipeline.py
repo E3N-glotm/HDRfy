@@ -64,7 +64,8 @@ def convert_image(
         if not cfg.pad_to_even:
             raise UnsupportedInputError(
                 "Odd image dimensions are disabled because some libultrahdr builds have unsafe "
-                "odd-dimension gain-map paths. Enable pad_to_even to duplicate the final row/column."
+                "odd-dimension gain-map paths. Enable pad_to_even to duplicate the final "
+                "row/column."
             )
         decoded, _ = pad_to_even(decoded)
 
