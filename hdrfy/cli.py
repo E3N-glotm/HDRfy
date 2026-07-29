@@ -1,4 +1,4 @@
-"""Command-line interface."""
+"""Secondary command-line interface for automation and structural inspection."""
 
 from __future__ import annotations
 
@@ -8,26 +8,16 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .build import build_libultrahdr
 from .config import PRESETS, ConversionConfig
-from .encoder import find_ultrahdr_binary, probe_ultrahdr
+from .encoder import probe_ultrahdr
 from .errors import HDRfyError
 from .pipeline import convert_image
-
-
-def _add_encoder_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--ultrahdr-bin",
-        type=Path,
-        default=None,
-        help="Path to Google's ultrahdr_app executable.",
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hdrfy",
-        description="Convert SDR JPEG, PNG and HEIF photographs into Ultra HDR JPEG files.",
+        description="Convert SDR photographs into pure-Python Ultra HDR JPEG files.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -47,45 +37,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use one gain-map channel instead of the default RGB gain map.",
     )
     convert.add_argument(
-        "--no-pad-even",
+        "--pad-even",
         action="store_true",
-        help="Reject odd dimensions instead of edge-padding one pixel.",
+        help="Compatibility option: edge-pad odd dimensions by at most one pixel.",
     )
     convert.add_argument("--strip-exif", action="store_true")
     convert.add_argument(
         "--force-sdr-heif",
         action="store_true",
-        help="Treat PQ/HLG-tagged HEIF input as SDR. Use only for incorrect source metadata.",
+        help="Treat PQ/HLG-tagged HEIF input as SDR only when its metadata is wrong.",
     )
     convert.add_argument(
         "--keep-intermediates",
         type=Path,
         default=None,
-        help="Keep generated raw intents and the linear BT.2020 NumPy array in this directory.",
+        help="Keep HDR/SDR NumPy arrays and the generated gain-map PNG.",
     )
     convert.add_argument("--no-verify", action="store_true")
-    _add_encoder_argument(convert)
 
-    inspect = subparsers.add_parser("inspect", help="Probe an Ultra HDR JPEG gain map.")
+    inspect = subparsers.add_parser("inspect", help="Inspect an Ultra HDR JPEG structure.")
     inspect.add_argument("input", type=Path)
-    _add_encoder_argument(inspect)
-
-    build = subparsers.add_parser(
-        "build-ultrahdr",
-        help="Build Google's libultrahdr reference app into a local tools directory.",
-    )
-    build.add_argument(
-        "--destination",
-        type=Path,
-        default=Path(".tools/libultrahdr"),
-    )
-    build.add_argument("--ref", default="main", help="Git branch, tag or commit to build.")
-    build.add_argument("--jobs", type=int, default=None)
-    build.add_argument(
-        "--system-jpeg",
-        action="store_true",
-        help="Use a system libjpeg instead of letting libultrahdr build its dependencies.",
-    )
     return parser
 
 
@@ -98,7 +69,7 @@ def _run_convert(args: argparse.Namespace) -> int:
         gainmap_quality=args.gainmap_quality,
         gainmap_scale=args.gainmap_scale,
         multi_channel_gainmap=not args.single_channel_gainmap,
-        pad_to_even=not args.no_pad_even,
+        pad_to_even=args.pad_even,
         preserve_exif=not args.strip_exif,
         force_sdr_heif=args.force_sdr_heif,
     )
@@ -106,7 +77,6 @@ def _run_convert(args: argparse.Namespace) -> int:
         args.input,
         args.output,
         config=config,
-        ultrahdr_binary=args.ultrahdr_bin,
         keep_intermediates=args.keep_intermediates,
         verify=not args.no_verify,
     )
@@ -136,17 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "convert":
             return _run_convert(args)
         if args.command == "inspect":
-            binary = find_ultrahdr_binary(args.ultrahdr_bin)
-            print(probe_ultrahdr(binary, args.input))
-            return 0
-        if args.command == "build-ultrahdr":
-            binary = build_libultrahdr(
-                args.destination,
-                ref=args.ref,
-                jobs=args.jobs,
-                build_dependencies=not args.system_jpeg,
-            )
-            print(binary)
+            print(probe_ultrahdr(args.input))
             return 0
     except (HDRfyError, ValueError) as exc:
         print(f"hdrfy: error: {exc}", file=sys.stderr)
