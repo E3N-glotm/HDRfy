@@ -49,8 +49,9 @@ PRESETS: dict[str, ReconstructionPreset] = {
 class ConversionConfig:
     """Complete conversion configuration.
 
-    The Ultra HDR linear HDR intent uses the libultrahdr convention where a
-    channel value of 1.0 corresponds to ``reference_white_nits``.
+    HDR values are relative to ``reference_white_nits``. A linear value of 1.0
+    represents SDR reference white, while ``peak_nits / reference_white_nits``
+    determines the maximum content boost encoded in the gain map.
     """
 
     preset: str = "natural"
@@ -60,7 +61,7 @@ class ConversionConfig:
     gainmap_quality: int = 95
     gainmap_scale: int = 2
     multi_channel_gainmap: bool = True
-    pad_to_even: bool = True
+    pad_to_even: bool = False
     preserve_exif: bool = True
     force_sdr_heif: bool = False
 
@@ -69,7 +70,7 @@ class ConversionConfig:
             choices = ", ".join(sorted(PRESETS))
             raise ValueError(f"Unknown preset {self.preset!r}; expected one of: {choices}")
         if not 203.0 <= self.peak_nits <= 10000.0:
-            raise ValueError("peak_nits must be in the libultrahdr range [203, 10000]")
+            raise ValueError("peak_nits must be in the Ultra HDR range [203, 10000]")
         if self.reference_white_nits <= 0:
             raise ValueError("reference_white_nits must be positive")
         if self.peak_nits < self.reference_white_nits:

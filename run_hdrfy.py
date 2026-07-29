@@ -1,19 +1,17 @@
-"""HDRfy 的脚本配置入口。
+"""HDRfy 的纯 Python 脚本配置入口。
 
 使用方式：
 1. 只修改下方“用户配置区”；
 2. 运行 ``python run_hdrfy.py``；
-3. 不需要在命令行传递输入路径或 HDR 参数。
+3. 不需要 C/C++ 编译器、CMake、Visual Studio 或外部编码器。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from hdrfy.build import build_libultrahdr
 from hdrfy.config import ConversionConfig
-from hdrfy.encoder import find_ultrahdr_binary
-from hdrfy.errors import HDRfyError, UltraHDREncoderNotFound
+from hdrfy.errors import HDRfyError
 from hdrfy.pipeline import ConversionResult, convert_image
 from hdrfy.script_runner import build_batch_items, collect_input_files
 
@@ -30,17 +28,6 @@ INPUT_PATH = Path(r"input")
 #   - 写成 output，则自动输出为 output/<原文件名>_hdr.jpg。
 # 目录输入时：必须填写输出目录，原目录层级会被保留。
 OUTPUT_PATH = Path(r"output")
-
-# 可选：显式指定 ultrahdr_app 或 ultrahdr_app.exe。
-# 保持 None 时，程序会依次搜索环境变量、PATH 和 .tools/libultrahdr。
-ULTRAHDR_BINARY: Path | None = None
-
-# 未找到参考编码器时是否自动下载并构建 google/libultrahdr。
-AUTO_BUILD_ULTRAHDR = True
-LIBULTRAHDR_BUILD_DIR = Path(r".tools/libultrahdr")
-LIBULTRAHDR_REF = "main"
-LIBULTRAHDR_BUILD_JOBS: int | None = None
-LIBULTRAHDR_BUILD_DEPENDENCIES = True
 
 # 批处理行为。
 RECURSIVE = True
@@ -61,12 +48,13 @@ GAINMAP_SCALE = 2
 MULTI_CHANNEL_GAINMAP = True
 
 # 输入、元数据与验证参数。
-PAD_ODD_DIMENSIONS_TO_EVEN = True
+# 纯 Python 编码器支持奇数尺寸，默认不补边。
+PAD_ODD_DIMENSIONS_TO_EVEN = False
 PRESERVE_EXIF = True
 FORCE_SDR_HEIF = False
 VERIFY_OUTPUT = True
 
-# 是否保留每张图的 RGBA16F、RGBA8888、NumPy HDR Intent 等中间结果。
+# 是否保留每张图的 HDR Intent、SDR Intent 和 Gain Map 中间结果。
 KEEP_INTERMEDIATES = False
 INTERMEDIATES_PATH = Path(r"artifacts/intermediates")
 
@@ -84,26 +72,6 @@ def resolve_project_path(path: str | Path) -> Path:
     if not candidate.is_absolute():
         candidate = PROJECT_ROOT / candidate
     return candidate.resolve()
-
-
-def resolve_encoder_binary() -> Path:
-    """查找参考编码器，并按脚本配置决定是否自动构建。"""
-
-    explicit = resolve_project_path(ULTRAHDR_BINARY) if ULTRAHDR_BINARY is not None else None
-    try:
-        return find_ultrahdr_binary(explicit)
-    except UltraHDREncoderNotFound:
-        if not AUTO_BUILD_ULTRAHDR:
-            raise
-
-    destination = resolve_project_path(LIBULTRAHDR_BUILD_DIR)
-    print(f"[HDRfy] 未找到 ultrahdr_app，开始构建到：{destination}")
-    return build_libultrahdr(
-        destination,
-        ref=LIBULTRAHDR_REF,
-        jobs=LIBULTRAHDR_BUILD_JOBS,
-        build_dependencies=LIBULTRAHDR_BUILD_DEPENDENCIES,
-    )
 
 
 def create_conversion_config() -> ConversionConfig:
@@ -155,10 +123,9 @@ def main() -> int:
         intermediates_root=intermediates_root,
     )
     config = create_conversion_config()
-    binary = resolve_encoder_binary()
 
     print(f"[HDRfy] 输入：{input_path}")
-    print(f"[HDRfy] 编码器：{binary}")
+    print("[HDRfy] 编码器：内置纯 Python Ultra HDR 封装器")
     print(f"[HDRfy] 待处理：{len(items)} 张")
 
     succeeded = 0
@@ -177,7 +144,6 @@ def main() -> int:
                 item.source,
                 item.output,
                 config=config,
-                ultrahdr_binary=binary,
                 keep_intermediates=item.intermediates,
                 verify=VERIFY_OUTPUT,
             )

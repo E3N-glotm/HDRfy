@@ -13,9 +13,5 @@ class ExistingHDRInputError(HDRfyError):
     """Raised when an HDR HEIF/AVIF is passed to the SDR reconstruction path."""
 
 
-class UltraHDREncoderNotFound(HDRfyError):
-    """Raised when the libultrahdr demo encoder executable cannot be located."""
-
-
 class UltraHDREncodeError(HDRfyError):
-    """Raised when libultrahdr rejects the generated raw intents."""
+    """Raised when gain-map generation or Ultra HDR JPEG packaging fails."""

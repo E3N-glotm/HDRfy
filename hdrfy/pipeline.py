@@ -1,23 +1,17 @@
-"""End-to-end SDR photograph to Ultra HDR conversion pipeline."""
+"""End-to-end SDR photograph to pure-Python Ultra HDR conversion pipeline."""
 
 from __future__ import annotations
 
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from .config import ConversionConfig
-from .encoder import (
-    UltraHDREncodeOptions,
-    encode_ultrahdr,
-    find_ultrahdr_binary,
-    probe_ultrahdr,
-)
+from .encoder import UltraHDREncodeOptions, encode_ultrahdr, probe_ultrahdr
 from .errors import UnsupportedInputError
 from .io import decode_sdr_image, pad_to_even
-from .raw import write_rgba16f, write_rgba8888
 from .reconstruct import reconstruct_hdr_linear_bt2020
 
 
@@ -47,11 +41,10 @@ def convert_image(
     output_path: str | Path,
     *,
     config: ConversionConfig | None = None,
-    ultrahdr_binary: str | Path | None = None,
     keep_intermediates: str | Path | None = None,
     verify: bool = True,
 ) -> ConversionResult:
-    """Convert one SDR image into a displayable Ultra HDR JPEG."""
+    """Convert one SDR image into a displayable Ultra HDR JPEG without an external binary."""
 
     cfg = config or ConversionConfig()
     cfg.validate()
@@ -60,13 +53,9 @@ def convert_image(
     decoded = decode_sdr_image(source, force_sdr_heif=cfg.force_sdr_heif)
     original_width, original_height = decoded.width, decoded.height
 
-    if decoded.width % 2 or decoded.height % 2:
-        if not cfg.pad_to_even:
-            raise UnsupportedInputError(
-                "Odd image dimensions are disabled because some libultrahdr builds have unsafe "
-                "odd-dimension gain-map paths. Enable pad_to_even to duplicate the final "
-                "row/column."
-            )
+    # Pure-Python JPEG packaging supports odd dimensions directly. Padding is
+    # retained only as an explicit compatibility option for existing configs.
+    if cfg.pad_to_even and (decoded.width % 2 or decoded.height % 2):
         decoded, _ = pad_to_even(decoded)
 
     hdr = reconstruct_hdr_linear_bt2020(
@@ -77,41 +66,31 @@ def convert_image(
     if not np.all(np.isfinite(hdr)):
         raise RuntimeError("HDR reconstruction produced non-finite samples")
 
-    binary = find_ultrahdr_binary(ultrahdr_binary)
-    persistent_dir = Path(keep_intermediates).expanduser().resolve() if keep_intermediates else None
-    if persistent_dir:
-        persistent_dir.mkdir(parents=True, exist_ok=True)
+    encoded = encode_ultrahdr(
+        sdr_srgb=decoded.srgb,
+        hdr_linear_bt2020=hdr,
+        output=output,
+        exif=decoded.exif if cfg.preserve_exif else None,
+        options=UltraHDREncodeOptions(
+            width=decoded.width,
+            height=decoded.height,
+            base_quality=cfg.base_quality,
+            gainmap_quality=cfg.gainmap_quality,
+            gainmap_scale=cfg.gainmap_scale,
+            multi_channel_gainmap=cfg.multi_channel_gainmap,
+            max_content_boost=cfg.max_content_boost,
+            target_peak_nits=cfg.peak_nits,
+        ),
+    )
 
-    with tempfile.TemporaryDirectory(prefix="hdrfy-") as temporary:
-        work = persistent_dir or Path(temporary)
-        hdr_raw = write_rgba16f(work / "hdr_intent_rgba16f.raw", hdr)
-        sdr_raw = write_rgba8888(work / "sdr_intent_rgba8888.raw", decoded.rgba8)
-        exif_path: Path | None = None
-        if cfg.preserve_exif and decoded.exif:
-            exif_path = work / "source.exif"
-            exif_path.write_bytes(decoded.exif)
+    if keep_intermediates:
+        work = Path(keep_intermediates).expanduser().resolve()
+        work.mkdir(parents=True, exist_ok=True)
+        np.save(work / "hdr_intent_linear_bt2020.npy", hdr)
+        np.save(work / "sdr_intent_srgb.npy", decoded.srgb)
+        Image.fromarray(encoded.gainmap).save(work / "gainmap.png")
 
-        encode_ultrahdr(
-            binary=binary,
-            hdr_raw=hdr_raw,
-            sdr_raw=sdr_raw,
-            output=output,
-            exif_path=exif_path,
-            options=UltraHDREncodeOptions(
-                width=decoded.width,
-                height=decoded.height,
-                base_quality=cfg.base_quality,
-                gainmap_quality=cfg.gainmap_quality,
-                gainmap_scale=cfg.gainmap_scale,
-                multi_channel_gainmap=cfg.multi_channel_gainmap,
-                max_content_boost=cfg.max_content_boost,
-                target_peak_nits=cfg.peak_nits,
-            ),
-        )
-        if persistent_dir:
-            np.save(work / "hdr_intent_linear_bt2020.npy", hdr)
-
-    probe_output = probe_ultrahdr(binary, output) if verify else "verification disabled"
+    probe_output = probe_ultrahdr(output) if verify else "verification disabled"
     return ConversionResult(
         input_path=source,
         output_path=output,
