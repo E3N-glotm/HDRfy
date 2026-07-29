@@ -30,6 +30,13 @@ def test_end_to_end_pure_python_pipeline_preserves_odd_size(tmp_path: Path) -> N
     assert (intermediates / "hdr_intent_linear_bt2020.npy").is_file()
     assert (intermediates / "sdr_intent_srgb.npy").is_file()
     assert (intermediates / "gainmap.png").is_file()
+    assert result.decode_seconds >= 0.0
+    assert result.reconstruct_seconds >= 0.0
+    assert result.encode_seconds >= 0.0
+    assert result.verify_seconds >= 0.0
+    assert result.total_seconds >= (
+        result.decode_seconds + result.reconstruct_seconds + result.encode_seconds
+    )
 
 
 def test_padding_remains_an_explicit_compatibility_option(tmp_path: Path) -> None:
