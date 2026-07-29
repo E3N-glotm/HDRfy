@@ -32,10 +32,10 @@ HDRfy 将普通 SDR `JPEG / PNG / HEIF / HEIC / AVIF` 照片转换为带 Gain Ma
 需要 Python 3.10 或更高版本，推荐 Python 3.12：
 
 ```powershell
-E:\program\Python\miniconda3\Scripts\conda.exe create -n hdrfy312 python=3.12 pip -y
-cd /d E:\program\Python\HDRfy
-E:\program\Python\miniconda3\envs\hdrfy312\python.exe -m pip install -U pip
-E:\program\Python\miniconda3\envs\hdrfy312\python.exe -m pip install -e .
+conda create -n hdrfy312 python=3.12 pip -y
+cd /d Path_to\HDRfy
+python -m pip install -U pip
+python -m pip install -e .
 ```
 
 不需要安装 Visual Studio、Visual Studio Build Tools、MSYS2、CMake 或 C++ 编译器。
@@ -51,29 +51,29 @@ run_hdrfy.py
 只修改顶部配置区，然后运行：
 
 ```powershell
-E:\program\Python\miniconda3\envs\hdrfy312\python.exe E:\program\Python\HDRfy\run_hdrfy.py
+python Path_to\HDRfy\run_hdrfy.py
 ```
 
 ### 单张图片
 
 ```python
-INPUT_PATH = Path(r"E:\Photos\source.heic")
-OUTPUT_PATH = Path(r"E:\Photos\source_hdr.jpg")
+INPUT_PATH = Path(r"Path_to\source.heic")
+OUTPUT_PATH = Path(r"Path_to\source_hdr.jpg")
 ```
 
 也可以让程序自动命名：
 
 ```python
-INPUT_PATH = Path(r"E:\Photos\source.heic")
-OUTPUT_PATH = Path(r"E:\Photos\HDR")
+INPUT_PATH = Path(r"Path_to\source.heic")
+OUTPUT_PATH = Path(r"Path_to\HDR")
 OUTPUT_NAME_SUFFIX = "_hdr"
 ```
 
 ### 整个目录
 
 ```python
-INPUT_PATH = Path(r"E:\Photos\SDR")
-OUTPUT_PATH = Path(r"E:\Photos\HDR")
+INPUT_PATH = Path(r"Path_to\SDR")
+OUTPUT_PATH = Path(r"Path_to\HDR")
 RECURSIVE = True
 OVERWRITE_EXISTING = False
 STOP_ON_ERROR = False
