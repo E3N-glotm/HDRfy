@@ -1,52 +1,36 @@
 # HDRfy
 
-HDRfy 将普通 SDR `JPEG / PNG / HEIF / HEIC / AVIF` 照片转换为可在兼容设备上实际触发 HDR 显示的 **Ultra HDR JPEG**，而不是简单提亮后保存一张普通图片。
+HDRfy 将普通 SDR `JPEG / PNG / HEIF / HEIC / AVIF` 照片转换为可在兼容设备上实际触发 HDR 显示的 **Ultra HDR JPEG**，而不是简单提亮后保存普通图片。
 
-项目当前采用两层结构：
+项目由两部分组成：
 
-1. Python 负责解码、色彩空间转换和单张 SDR 图像的逆色调映射；
-2. Google [`libultrahdr`](https://github.com/google/libultrahdr) 参考编码器负责计算 Gain Map，并将 SDR 基础图、增益图和标准元数据封装为向下兼容的 JPEG。
+1. Python 负责图像解码、色彩空间转换和 SDR-to-HDR 逆色调映射；
+2. Google [`libultrahdr`](https://github.com/google/libultrahdr) 参考编码器负责计算 Gain Map，并将 SDR 基础图、增益图和标准元数据封装成向下兼容的 JPEG。
 
-不支持 Ultra HDR 的查看器仍会显示正常 SDR 底图；支持 Ultra HDR 且连接 HDR 屏幕的系统会读取 Gain Map，恢复更高的高光亮度。
+不支持 Ultra HDR 的查看器会显示正常的 SDR 底图；支持 Ultra HDR 且连接 HDR 屏幕的系统会读取 Gain Map，恢复更高的高光亮度。
 
 ## 当前能力
 
 - 输入 JPEG、PNG、HEIF、HEIC 和 AVIF；
+- 单文件转换与目录批处理；
+- 所有路径和算法参数集中写在 `run_hdrfy.py` 顶部；
+- 运行时不需要在命令行指定输入路径或 HDR 参数；
 - 使用 `float32` 线性光处理，不在 8-bit 图像上直接乘亮度；
 - 将线性 BT.709/sRGB 转换到线性 BT.2020；
-- 提供 `conservative`、`natural`、`vivid` 三种确定性逆色调映射预设；
-- HDR 意图以 BT.2100 线性 `RGBA16F` 交给 `libultrahdr`；
-- SDR 意图以 BT.709 `RGBA8888` 交给 `libultrahdr`；
+- 提供 `conservative`、`natural`、`vivid` 三种逆色调映射预设；
+- HDR Intent 使用 BT.2100 线性 `RGBA16F`；
+- SDR Intent 使用 BT.709 `RGBA8888`；
 - 默认 203 nit 参考白、1000 nit 峰值亮度；
 - 自动生成多通道 Gain Map 和 Ultra HDR JPEG；
-- 编码结束后调用 `libultrahdr` Probe 模式验证 Gain Map 元数据；
-- 检测带 PQ/HLG NCLX 标记的现有 HDR HEIF，避免重复 HDR 化；
-- 默认对奇数尺寸执行最多一像素的边缘填充，规避部分 `libultrahdr` 版本的奇数尺寸风险；
-- 可保留 EXIF，并可导出中间 `RGBA16F`、`RGBA8888` 和线性 BT.2020 NumPy 数据。
-
-## 处理流程
-
-```mermaid
-flowchart LR
-    A[JPEG / PNG / HEIF] --> B[解码与方向校正]
-    B --> C[sRGB float32]
-    C --> D[sRGB EOTF]
-    D --> E[线性 BT.709]
-    E --> F[线性 BT.2020]
-    F --> G[高光选择性扩展]
-    G --> H[局部亮度细节控制]
-    H --> I[色度滚降与峰值限制]
-    I --> J[BT.2100 Linear RGBA16F HDR Intent]
-    B --> K[BT.709 RGBA8888 SDR Intent]
-    J --> L[libultrahdr]
-    K --> L
-    L --> M[SDR JPEG + Gain Map + Metadata]
-    M --> N[Ultra HDR JPEG]
-```
+- 编码结束后调用 `libultrahdr` Probe 模式验证输出；
+- 检测带 PQ/HLG NCLX 标记的 HDR HEIF，避免重复 HDR 化；
+- 默认对奇数尺寸执行最多一像素边缘填充；
+- 可保留 EXIF 和调试中间文件；
+- 未找到 `ultrahdr_app` 时可由脚本自动下载并构建。
 
 ## 安装
 
-需要 Python 3.10 或更高版本：
+需要 Python 3.10 或更高版本。
 
 ```bash
 python -m venv .venv
@@ -68,154 +52,260 @@ python -m pip install -U pip
 python -m pip install -e .
 ```
 
-## 构建 libultrahdr
-
-HDRfy 不自行实现或伪造 Ultra HDR 容器，而是调用官方参考编码器。以下命令会把源码和构建产物放进 `.tools/libultrahdr`，不会安装到系统目录：
-
-```bash
-hdrfy build-ultrahdr
-```
-
-默认构建 `google/libultrahdr` 的 `main` 分支，并让其自行构建 JPEG 依赖。已有系统 `libjpeg` 时可使用：
-
-```bash
-hdrfy build-ultrahdr --system-jpeg
-```
-
-也可以固定到指定标签、分支或提交：
-
-```bash
-hdrfy build-ultrahdr --ref <tag-or-commit>
-```
-
-构建工具要求：
+构建 `libultrahdr` 还需要：
 
 - Git；
 - CMake 3.15 或更高版本；
 - 支持 C++17 的编译器；
-- 推荐 Ninja；
-- Windows 推荐 MSYS2 UCRT64 或 Visual Studio C++ Build Tools。
+- 推荐安装 Ninja；
+- Windows 推荐 Visual Studio C++ Build Tools 或 MSYS2 UCRT64。
 
-也可以直接指定已有的编码器：
+## 使用方式
 
-```bash
-hdrfy convert input.jpg output_hdr.jpg --ultrahdr-bin /path/to/ultrahdr_app
-```
-
-或者设置环境变量：
-
-```bash
-export HDRFY_ULTRAHDR_BIN=/path/to/ultrahdr_app
-```
-
-Windows PowerShell：
-
-```powershell
-$env:HDRFY_ULTRAHDR_BIN = "D:\tools\libultrahdr\ultrahdr_app.exe"
-```
-
-## 使用
-
-默认自然预设、1000 nit 峰值：
-
-```bash
-hdrfy convert input.jpg output_hdr.jpg
-```
-
-处理 PNG 或 HEIF：
-
-```bash
-hdrfy convert input.png output_hdr.jpg
-hdrfy convert input.heic output_hdr.jpg
-```
-
-保守模式，适合人像和已经有较强对比度的照片：
-
-```bash
-hdrfy convert input.jpg output_hdr.jpg \
-  --preset conservative \
-  --peak-nits 800
-```
-
-更强的高光效果：
-
-```bash
-hdrfy convert input.jpg output_hdr.jpg \
-  --preset vivid \
-  --peak-nits 1200 \
-  --gainmap-quality 98
-```
-
-保留调试中间文件：
-
-```bash
-hdrfy convert input.jpg output_hdr.jpg \
-  --keep-intermediates artifacts/debug
-```
-
-该目录会包含：
+不需要在命令行传递路径和参数。只修改根目录的：
 
 ```text
-hdr_intent_rgba16f.raw
-sdr_intent_rgba8888.raw
-hdr_intent_linear_bt2020.npy
-source.exif                 # 输入含 EXIF 时
+run_hdrfy.py
 ```
 
-检查现有文件是否能被参考解码器识别为 Ultra HDR：
+然后直接运行：
 
 ```bash
-hdrfy inspect output_hdr.jpg
+python run_hdrfy.py
 ```
 
-## 参数含义
+### 1. 设置输入输出路径
+
+打开 `run_hdrfy.py`，修改：
+
+```python
+INPUT_PATH = Path(r"input")
+OUTPUT_PATH = Path(r"output")
+```
+
+所有相对路径均相对于仓库根目录，而不是终端当前工作目录。
+
+单文件输入并指定确切输出文件：
+
+```python
+INPUT_PATH = Path(r"photos/source.heic")
+OUTPUT_PATH = Path(r"results/source_hdr.jpg")
+```
+
+单文件输入并让程序自动命名：
+
+```python
+INPUT_PATH = Path(r"photos/source.heic")
+OUTPUT_PATH = Path(r"results")
+OUTPUT_NAME_SUFFIX = "_hdr"
+```
+
+输出为：
 
 ```text
---preset conservative|natural|vivid
---peak-nits 1000
---reference-white-nits 203
---quality 95
---gainmap-quality 95
---gainmap-scale 2
---single-channel-gainmap
---strip-exif
---no-pad-even
---force-sdr-heif
---no-verify
+results/source_hdr.jpg
 ```
 
-`peak_nits / reference_white_nits` 决定最大内容亮度增益。例如默认配置为：
+目录批处理：
+
+```python
+INPUT_PATH = Path(r"photos")
+OUTPUT_PATH = Path(r"results")
+RECURSIVE = True
+```
+
+程序会保留输入目录层级。例如：
+
+```text
+photos/trip/day1/a.heic
+```
+
+输出为：
+
+```text
+results/trip/day1/a_hdr.jpg
+```
+
+### 2. 调节 HDR 效果
+
+自然模式：
+
+```python
+PRESET = "natural"
+PEAK_NITS = 1000.0
+REFERENCE_WHITE_NITS = 203.0
+```
+
+保守模式，适合人像或对比度已经较强的照片：
+
+```python
+PRESET = "conservative"
+PEAK_NITS = 800.0
+```
+
+较强高光效果：
+
+```python
+PRESET = "vivid"
+PEAK_NITS = 1200.0
+GAINMAP_QUALITY = 98
+```
+
+`PEAK_NITS / REFERENCE_WHITE_NITS` 决定最大内容亮度增益。默认值为：
 
 ```text
 1000 / 203 = 4.926 倍
 ```
 
-该值不是对整张图统一乘 4.926，而是只通过平滑曲线逐渐作用于高亮区域；暗部和大部分中间调保持接近原始 SDR 亮度。
+该增益不会统一乘到整张图上，而是通过平滑曲线主要作用于高亮区域；暗部和大部分中间调保持接近原始 SDR 亮度。
+
+### 3. 调节 JPEG 和 Gain Map
+
+```python
+BASE_JPEG_QUALITY = 95
+GAINMAP_QUALITY = 95
+GAINMAP_SCALE = 2
+MULTI_CHANNEL_GAINMAP = True
+```
+
+一般不建议把 `GAINMAP_SCALE` 调得过大，否则增益图空间分辨率下降，细小高光边缘可能不够准确。
+
+### 4. 设置批处理行为
+
+```python
+RECURSIVE = True
+OVERWRITE_EXISTING = False
+STOP_ON_ERROR = False
+OUTPUT_NAME_SUFFIX = "_hdr"
+```
+
+含义：
+
+- `RECURSIVE=True`：递归处理子目录；
+- `OVERWRITE_EXISTING=False`：已有输出时跳过；
+- `STOP_ON_ERROR=False`：某张图失败后继续处理其他图片；
+- `OUTPUT_NAME_SUFFIX="_hdr"`：自动输出文件名后缀。
+
+当输出目录位于输入目录内部时，程序会跳过输出目录，避免下一次运行重新处理已经生成的 HDR 图片。
+
+### 5. 设置参考编码器
+
+默认配置：
+
+```python
+ULTRAHDR_BINARY = None
+AUTO_BUILD_ULTRAHDR = True
+LIBULTRAHDR_BUILD_DIR = Path(r".tools/libultrahdr")
+LIBULTRAHDR_REF = "main"
+LIBULTRAHDR_BUILD_JOBS = None
+LIBULTRAHDR_BUILD_DEPENDENCIES = True
+```
+
+程序会依次查找：
+
+1. `ULTRAHDR_BINARY` 指定的文件；
+2. `HDRFY_ULTRAHDR_BIN` 环境变量；
+3. 系统 `PATH`；
+4. 项目 `.tools/libultrahdr` 构建目录。
+
+仍未找到且 `AUTO_BUILD_ULTRAHDR=True` 时，会自动下载并构建 Google `libultrahdr`。
+
+已有编码器时可直接在脚本中写绝对路径：
+
+```python
+ULTRAHDR_BINARY = Path(r"D:\tools\libultrahdr\ultrahdr_app.exe")
+AUTO_BUILD_ULTRAHDR = False
+```
+
+Linux 示例：
+
+```python
+ULTRAHDR_BINARY = Path(r"/home/user/tools/libultrahdr/ultrahdr_app")
+AUTO_BUILD_ULTRAHDR = False
+```
+
+### 6. 保留调试中间结果
+
+```python
+KEEP_INTERMEDIATES = True
+INTERMEDIATES_PATH = Path(r"artifacts/intermediates")
+```
+
+每张图会使用独立子目录，包含：
+
+```text
+hdr_intent_rgba16f.raw
+sdr_intent_rgba8888.raw
+hdr_intent_linear_bt2020.npy
+source.exif
+```
+
+### 7. 输入和验证设置
+
+```python
+PAD_ODD_DIMENSIONS_TO_EVEN = True
+PRESERVE_EXIF = True
+FORCE_SDR_HEIF = False
+VERIFY_OUTPUT = True
+```
+
+- `PAD_ODD_DIMENSIONS_TO_EVEN`：奇数宽高时复制最后一行或一列；
+- `PRESERVE_EXIF`：将输入 EXIF 交给 Ultra HDR 编码器；
+- `FORCE_SDR_HEIF`：忽略 HEIF 的 PQ/HLG 标记，通常应保持 `False`；
+- `VERIFY_OUTPUT`：编码后使用 Probe 模式检查 Gain Map 元数据。
 
 ## HEIF 输入说明
 
-HDRfy 使用 `pillow-heif` 的 10/12-bit 解码路径读取 HEIF 系列文件，并检查 NCLX `transfer_characteristics`：
+HDRfy 使用 `pillow-heif` 的高位深路径读取 HEIF 系列文件，并检查 NCLX `transfer_characteristics`：
 
 - `16`：PQ；
 - `18`：HLG。
 
-检测到这些标记时，程序默认拒绝进入 SDR-to-HDR 重建路径，因为再次扩展会造成亮度和颜色错误。只有在确认源文件元数据本身错误时，才使用：
+检测到这些标记时，程序默认拒绝进入 SDR-to-HDR 重建路径，因为重复扩展会导致亮度和颜色错误。只有确认源文件被错误标记时，才设置：
+
+```python
+FORCE_SDR_HEIF = True
+```
+
+## 处理流程
+
+```mermaid
+flowchart LR
+    A[JPEG / PNG / HEIF] --> B[解码与方向校正]
+    B --> C[sRGB float32]
+    C --> D[sRGB EOTF]
+    D --> E[线性 BT.709]
+    E --> F[线性 BT.2020]
+    F --> G[高光选择性扩展]
+    G --> H[局部亮度细节控制]
+    H --> I[色度滚降与峰值限制]
+    I --> J[BT.2100 Linear RGBA16F HDR Intent]
+    B --> K[BT.709 RGBA8888 SDR Intent]
+    J --> L[libultrahdr]
+    K --> L
+    L --> M[SDR JPEG + Gain Map + Metadata]
+    M --> N[Ultra HDR JPEG]
+```
+
+## 命令行入口
+
+项目仍保留 `hdrfy convert`、`hdrfy inspect` 和 `hdrfy build-ultrahdr`，用于自动化集成和测试，但普通使用不依赖这些命令。默认推荐入口始终是：
 
 ```bash
-hdrfy convert incorrectly_tagged.heic output_hdr.jpg --force-sdr-heif
+python run_hdrfy.py
 ```
 
 ## 算法边界
 
-单张 SDR 照片已经裁掉的高光纹理无法被物理恢复。当前算法做的是确定性的逆色调映射：根据原图亮度结构重建合理的显示亮度，并对高光细节做有限增强，不凭空生成太阳、灯具或天空纹理。
+单张 SDR 照片中已经裁掉的高光纹理无法被物理恢复。当前算法执行确定性逆色调映射：根据原图亮度结构重建合理的显示亮度，并对高光细节做有限增强，不凭空生成太阳、灯具或天空纹理。
 
-因此当前版本适合：
+当前版本适合：
 
 - 验证真正的 HDR 静态图片编码链路；
 - 将普通照片转换成兼容性较好的 Ultra HDR JPEG；
-- 为后续接入 LHDR、HDRTVDM 等神经网络后端提供稳定的输入输出与色彩管理框架。
+- 为后续接入 LHDR、HDRTVDM 等神经网络后端提供稳定框架。
 
-它不承诺恢复相机传感器已经丢失的信息，也不会把普通 16-bit PNG 错称为可显示 HDR。
+它不承诺恢复传感器已经丢失的信息，也不会把普通 16-bit PNG 错称为可显示 HDR。
 
 ## 开发测试
 
@@ -225,16 +315,4 @@ pytest
 ruff check .
 ```
 
-单元测试覆盖：
-
-- sRGB 传递函数往返；
-- BT.709 与 BT.2020 矩阵往返；
-- 亮度计算；
-- 逆色调映射范围和稳定性；
-- `RGBA16F`、`RGBA8888` 原始内存布局；
-- `ultrahdr_app` 命令行参数契约；
-- 端到端 Python 管线的模拟编码与 Probe 验证。
-
-## 后续路线
-
-当前 `reconstruct_hdr_linear_bt2020()` 是独立重建边界。后续可以新增统一后端接口，把确定性算法替换为预训练单图 HDR 重建模型，而不修改解码、色彩管理、Gain Map 编码和验证模块。
+测试覆盖色彩转换、逆色调映射、原始内存布局、编码器参数契约、HEIF 元数据、端到端管线，以及脚本配置入口的单文件和目录批处理路径规划。
