@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from hdrfy.errors import HDRfyError
-from run_hdrfy import build_batch_items, collect_input_files
+from hdrfy.script_runner import build_batch_items, collect_input_files
 
 
 def test_collect_input_files_recursively_and_skip_output_tree(tmp_path: Path) -> None:
