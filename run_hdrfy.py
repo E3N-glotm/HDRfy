@@ -8,12 +8,15 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 from hdrfy.config import ConversionConfig
 from hdrfy.errors import HDRfyError
 from hdrfy.pipeline import ConversionResult, convert_image
-from hdrfy.script_runner import build_batch_items, collect_input_files
+from hdrfy.script_runner import BatchItem, build_batch_items, collect_input_files
 
 # =============================================================================
 # 用户配置区：通常只需要修改本区域
@@ -34,6 +37,16 @@ RECURSIVE = True
 OVERWRITE_EXISTING = False
 STOP_ON_ERROR = False
 OUTPUT_NAME_SUFFIX = "_hdr"
+
+# 并行处理不同图片的线程数：
+#   1：完全串行；
+#   0：自动，最多使用 2 个线程；
+#   2 或更大：显式指定线程数。
+# 单张图片时该值自动降为 1；单图内部仍会重叠 JPEG 压缩和 Gain Map 计算。
+BATCH_WORKERS = 2
+
+# 是否打印解码、HDR 重建、编码、验证等分阶段耗时。
+SHOW_TIMINGS = True
 
 # HDR 重建参数。
 # preset: conservative（保守）/ natural（自然）/ vivid（较强）
@@ -65,6 +78,14 @@ INTERMEDIATES_PATH = Path(r"artifacts/intermediates")
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
+@dataclass(frozen=True, slots=True)
+class BatchOutcome:
+    index: int
+    item: BatchItem
+    result: ConversionResult | None = None
+    error: Exception | None = None
+
+
 def resolve_project_path(path: str | Path) -> Path:
     """将脚本配置中的路径稳定解析为绝对路径。"""
 
@@ -72,6 +93,18 @@ def resolve_project_path(path: str | Path) -> Path:
     if not candidate.is_absolute():
         candidate = PROJECT_ROOT / candidate
     return candidate.resolve()
+
+
+def resolve_worker_count(item_count: int) -> int:
+    """Resolve a conservative thread count without multiplying image memory excessively."""
+
+    if item_count <= 1:
+        return 1
+    if BATCH_WORKERS < 0:
+        raise HDRfyError("BATCH_WORKERS 不能小于 0")
+    if BATCH_WORKERS == 0:
+        return max(1, min(2, item_count, os.cpu_count() or 1))
+    return max(1, min(BATCH_WORKERS, item_count))
 
 
 def create_conversion_config() -> ConversionConfig:
@@ -91,14 +124,93 @@ def create_conversion_config() -> ConversionConfig:
     return config
 
 
-def print_result(result: ConversionResult) -> None:
+def print_result(result: ConversionResult, *, index: int, total: int) -> None:
     padded = ""
     if (result.width, result.height) != (result.padded_width, result.padded_height):
         padded = f"，补边后 {result.padded_width}x{result.padded_height}"
     print(
-        f"[完成] {result.input_path.name} -> {result.output_path} "
+        f"[完成 {index}/{total}] {result.input_path.name} -> {result.output_path} "
         f"({result.width}x{result.height}{padded}, {result.peak_nits:g} nit)"
     )
+    if SHOW_TIMINGS:
+        print(
+            "  耗时："
+            f"解码 {result.decode_seconds:.2f}s，"
+            f"HDR重建 {result.reconstruct_seconds:.2f}s，"
+            f"编码 {result.encode_seconds:.2f}s，"
+            f"验证 {result.verify_seconds:.2f}s，"
+            f"总计 {result.total_seconds:.2f}s"
+        )
+
+
+def process_item(
+    index: int,
+    item: BatchItem,
+    config: ConversionConfig,
+) -> BatchOutcome:
+    try:
+        result = convert_image(
+            item.source,
+            item.output,
+            config=config,
+            keep_intermediates=item.intermediates,
+            verify=VERIFY_OUTPUT,
+        )
+        return BatchOutcome(index=index, item=item, result=result)
+    except Exception as exc:  # noqa: BLE001 - 返回主线程统一汇总
+        return BatchOutcome(index=index, item=item, error=exc)
+
+
+def run_pending_items(
+    pending: list[tuple[int, BatchItem]],
+    *,
+    total: int,
+    config: ConversionConfig,
+    worker_count: int,
+) -> tuple[int, list[tuple[Path, str]]]:
+    succeeded = 0
+    failures: list[tuple[Path, str]] = []
+
+    if worker_count == 1:
+        for index, item in pending:
+            print(f"[处理 {index}/{total}] {item.source}")
+            outcome = process_item(index, item, config)
+            if outcome.result is not None:
+                print_result(outcome.result, index=index, total=total)
+                succeeded += 1
+                continue
+            assert outcome.error is not None
+            failures.append((item.source, str(outcome.error)))
+            print(f"[失败 {index}/{total}] {item.source}: {outcome.error}")
+            if STOP_ON_ERROR:
+                raise outcome.error
+        return succeeded, failures
+
+    executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="hdrfy-batch")
+    futures: dict[Future[BatchOutcome], tuple[int, BatchItem]] = {}
+    try:
+        for index, item in pending:
+            print(f"[提交 {index}/{total}] {item.source}")
+            futures[executor.submit(process_item, index, item, config)] = (index, item)
+
+        for future in as_completed(futures):
+            index, item = futures[future]
+            outcome = future.result()
+            if outcome.result is not None:
+                print_result(outcome.result, index=index, total=total)
+                succeeded += 1
+                continue
+            assert outcome.error is not None
+            failures.append((item.source, str(outcome.error)))
+            print(f"[失败 {index}/{total}] {item.source}: {outcome.error}")
+            if STOP_ON_ERROR:
+                for pending_future in futures:
+                    pending_future.cancel()
+                raise outcome.error
+    finally:
+        executor.shutdown(wait=True, cancel_futures=STOP_ON_ERROR)
+
+    return succeeded, failures
 
 
 def main() -> int:
@@ -125,35 +237,26 @@ def main() -> int:
     config = create_conversion_config()
 
     print(f"[HDRfy] 输入：{input_path}")
-    print("[HDRfy] 编码器：内置纯 Python Ultra HDR 封装器")
+    print("[HDRfy] 编码器：内置优化版纯 Python Ultra HDR 封装器")
     print(f"[HDRfy] 待处理：{len(items)} 张")
 
-    succeeded = 0
     skipped = 0
-    failures: list[tuple[Path, str]] = []
-
+    pending: list[tuple[int, BatchItem]] = []
     for index, item in enumerate(items, start=1):
-        print(f"[{index}/{len(items)}] {item.source}")
         if item.output.exists() and not OVERWRITE_EXISTING:
-            print(f"[跳过] 输出已存在：{item.output}")
+            print(f"[跳过 {index}/{len(items)}] 输出已存在：{item.output}")
             skipped += 1
-            continue
+        else:
+            pending.append((index, item))
 
-        try:
-            result = convert_image(
-                item.source,
-                item.output,
-                config=config,
-                keep_intermediates=item.intermediates,
-                verify=VERIFY_OUTPUT,
-            )
-            print_result(result)
-            succeeded += 1
-        except Exception as exc:  # noqa: BLE001 - 批处理需要记录单文件失败并继续
-            failures.append((item.source, str(exc)))
-            print(f"[失败] {item.source}: {exc}")
-            if STOP_ON_ERROR:
-                raise
+    worker_count = resolve_worker_count(len(pending))
+    print(f"[HDRfy] 批处理线程：{worker_count}")
+    succeeded, failures = run_pending_items(
+        pending,
+        total=len(items),
+        config=config,
+        worker_count=worker_count,
+    )
 
     print("\n========== HDRfy 处理汇总 ==========")
     print(f"成功：{succeeded}")
